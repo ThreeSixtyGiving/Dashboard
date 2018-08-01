@@ -5,6 +5,4 @@ __pycache__/
 *.pbix
 *.ipynb
 *.pkl
-mockups/
-uploads/
-archive/
+data/
