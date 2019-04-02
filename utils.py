@@ -11,7 +11,8 @@ import dash_html_components as html
 
 # fetch the 360Giving registry
 def get_registry(reg_url):
-    return requests.get(reg_url).json()
+    r = requests.get(reg_url)
+    return r.json()
 
 def get_registry_by_publisher(filters={}, **kwargs):
     reg = get_registry(**kwargs)

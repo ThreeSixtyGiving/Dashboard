@@ -88,62 +88,58 @@ app.layout = html.Div(id="status-container", className='', children=[
     ]),
 ])
 
-@app.callback(Output('status-licence', 'options'),
+@app.callback([Output('status-licence', 'options'),
+               Output('status-fields', 'options'),
+               Output('status-currency', 'options'),
+               Output('status-file-type', 'options')],
               [Input('status-container', 'children')])
-def get_status_options(_):
+def get_options(_):
     reg = get_registry(THREESIXTY_STATUS_JSON)
+    return_options = []
+
+    # get licences
     licenses = {}
     for r in reg:
         if r.get('license') and r.get('license') in licenses:
             continue
         licenses[r.get('license')] = r.get('license_name')
-    return [{
+    return_options.append([{
         "label": v,
         "value": k
-    } for k, v in licenses.items()]
+    } for k, v in licenses.items()])
 
-@app.callback(Output('status-fields', 'options'),
-              [Input('status-container', 'children')])
-def get_status_options(_):
-    reg = get_registry(THREESIXTY_STATUS_JSON)
+    # get fields
     fields = set()
     for r in reg:
         for f, field in r.get("datagetter_coverage", {}).items():
             if field.get("standard"):
                 fields.add(f)
-    fields = sorted(list(fields))
-    return [{
+    return_options.append([{
         "label": f,
         "value": f
-    } for f in list(fields)]
+    } for f in sorted(list(fields))])
 
-@app.callback(Output('status-currency', 'options'),
-              [Input('status-container', 'children')])
-def get_currency_options(_):
-    reg = get_registry(THREESIXTY_STATUS_JSON)
-    currencies = []
+    # get currencies
+    currencies = set()
     for r in reg:
-        for c in r.get("datagetter_aggregates", {}).get('currencies', {}):
-            if c not in currencies:
-                currencies.append(c)
-    
-    return [{
+        for c in r.get("datagetter_aggregates", {}).get('currencies', {}).keys():
+            currencies.add(c)
+    return_options.append([{
         "label": "{} [{}]".format(babel.numbers.get_currency_name(c), c),
         "value": c
-    } for c in currencies]
+    } for c in currencies])
 
-@app.callback(Output('status-file-type', 'options'),
-              [Input('status-container', 'children')])
-def get_filetype_options(_):
-    reg = get_registry(THREESIXTY_STATUS_JSON)
+    # get filetypes
     filetypes = {}
     for r in reg:
         filetype = r.get('datagetter_metadata', {}).get("file_type")
-        filetypes[filetype] = FILE_TYPES.get(filetype, (filetype, filetype))
-    return [{
+        filetypes[filetype] = FILE_TYPES.get(filetype, (filetype, "Unknown"))
+    return_options.append([{
         "label": "{} ({})".format(v[0], v[1]),
         "value": k
-    } for k, v in filetypes.items()]
+    } for k, v in filetypes.items()])
+
+    return return_options
 
 
 @app.callback(Output('status-rows', 'children'),
