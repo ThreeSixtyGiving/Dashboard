@@ -1,588 +1,404 @@
-# -*- coding: utf-8 -*-
-import dash
-
-THREESIXTY_STATUS_JSON = 'https://storage.googleapis.com/datagetter-360giving-output/branch/master/status.json'
-THREESIXTY_STATUS_LOCATION = 'data/status.json'
-
-app = dash.Dash(__name__)
-app.config.suppress_callback_exceptions = True
-
-
-
-## FETCHING STATUS FILE ##
-import requests
+import hashlib
+import os
 import json
-import dateutil.parser
+import io
 import datetime
+import dateutil.parser
 
-
-def fetch_status_file(url=THREESIXTY_STATUS_JSON, location=THREESIXTY_STATUS_LOCATION):
-    """
-    Download the json status file and save to disk
-    """
-    with open(location, 'w') as reg_file:
-        reg = requests.get(url)
-        json.dump(reg.json(), reg_file, indent=4)
-
-
-def get_status_file(location=THREESIXTY_STATUS_LOCATION):
-    """
-    Open the status file from disk and turn into list
-
-    Convert any datetime fields into datetime objects
-    """
-    with open(location, 'r') as reg_file:
-        reg = json.load(reg_file)
-
-        # convert date/datetime fields
-        datetime_fields = [ 
-            # format YYYY-MM-DDTHH:MM+00:00:
-            ['modified'], 
-            ['datagetter_metadata', 'datetime_downloaded'], 
-            # format YYYY-MM-DD:
-            ['issued'],
-            ['datagetter_aggregates', 'max_award_date'],
-            ['datagetter_aggregates', 'min_award_date'],
-        ]
-        for reg_entry in reg:
-            for field in datetime_fields:
-                if len(field) == 2:
-                    val = reg_entry.get(field[0], {}).get(field[1])
-                    if val:
-                        reg_entry[field[0]][field[1]] = dateutil.parser.parse(
-                            val, ignoretz=True)
-                elif len(field) == 1:
-                    val = reg_entry.get(field[0])
-                    if val:
-                        reg_entry[field[0]] = dateutil.parser.parse(
-                            val, ignoretz=True)
-
-        return reg
-
-
-def get_registry_by(by='publisher', location=THREESIXTY_STATUS_LOCATION):
-    """
-    Turn registry list into a dictionary ordered by a particular key
-    """
-    reg = get_status_file(location)
-    reg_ = {}
-    reg_stats = {}
-    for r in reg:
-        if by == 'file':
-            key = r.get('identifier')
-        else:
-            key = r.get('publisher', {}).get('name')
-        if key not in reg_:
-            reg_[key] = []
-            reg_stats[key] = {
-                "files": 0,
-                "count": 0,
-                "currencies": [],
-                "distinct_funding_org_identifier": [],
-                "recipient_org_identifier_prefixes": {},
-                "max_award_date": None,
-                "min_award_date": None,
-                "license": {},
-            }
-        reg_[key].append(r)
-    return reg_
-
-
-def get_registry_currencies(reg):
-    currencies = set()
-
-    # by publisher (etc)
-    if isinstance(reg, dict):
-        for reg_pub in reg.values():
-            for r in reg_pub:
-                for currency in r.get('datagetter_aggregates', {}).get('currencies', {}):
-                    currencies.add(currency)
-
-    # raw list from status.json
-    elif isinstance(reg, list):
-        for r in reg:
-            for currency in r.get('datagetter_aggregates', {}).get('currencies', {}):
-                currencies.add(currency)
-
-    return list(currencies)
-
-
-def normalize_data(data):
-    total = sum(data)
-    return [d / float(total) for d in data]
-
-
-def get_buttons(data, title=''):
-    return [
-        {
-            'label': 'By {}'.format(d["name"]),
-            'method': 'update',
-            'args': [
-                {'visible': [i == j for j in range(len(data))]},
-                # {'title': '{} by {}'.format(title, d["name"])},
-            ]
-        }
-        for i, d in enumerate(data)
-    ]
-
-def flatten_list(l):
-    """
-    From: https://stackoverflow.com/questions/952914/making-a-flat-list-out-of-list-of-lists-in-python
-    """
-    return [item for sublist in l for item in sublist]
-
-
-## SERVER ##
+import dash
 import dash_core_components as dcc
 import dash_html_components as html
 from dash.dependencies import Input, Output, State
 
+import babel.numbers
+import humanize
+import requests_cache
+
+from utils import get_registry_by_publisher, get_registry, pluralize, format_currency, message_box
+
+
+# THREESIXTY_STATUS_JSON = 'https://storage.googleapis.com/datagetter-360giving-output/branch/master/status.json'
+THREESIXTY_STATUS_JSON = 'https://storage.googleapis.com/datagetter-360giving-output/branch/11-coverage/coverage.json'
+THREESIXTY_STATUS_LOCATION = 'data/status.json'
+FILE_TYPES = {
+    "xlsx": ("Excel", "Microsoft Excel"),
+    "xls": ("Excel", "Microsoft Excel (pre 2007)"),
+    "csv": ("CSV", "Comma Separated Values"),
+    "json": ("JSON", "JSON is a structured file format"),
+}
+
+app = dash.Dash(__name__)
+# app.config.suppress_callback_exceptions = True
+
 app.css.append_css({
     "external_url": "https://unpkg.com/tachyons@4.10.0/css/tachyons.min.css"
 })
+app.css.append_css({
+    "external_url": "https://fonts.googleapis.com/css?family=Source+Sans+Pro%3A400%2C400i%2C600%2C700&ver=4.9.8"
+})
 
-app.layout = html.Div(id='registry-container', className='avenir pa4', children=[
-    html.H1(className='f1 lh-solid', children='Registry Dashboard'),
-    html.Div(id='registry-filters', className='fl w-25 pa2', children=[
-        'Test'
+cache_expiry = 60*60 # one hour in seconds
+requests_cache.install_cache(
+    backend='sqlite',
+    expire_after=cache_expiry,
+    allowable_methods=('GET', 'HEAD',),
+)
+
+app.layout = html.Div(id="status-container", className='', children=[
+    html.Div(className="fl w-25-l w-100 pa2-l", children=[
+        message_box(title="Filter data", contents=[
+            html.Form(className='', children=[
+                html.Div(className='cf mv3', children=[
+                    html.Div(className='', children=[
+                        dcc.Input(id='status-search', placeholder='Search',
+                                  type='text', className='w-100 pa2'),
+                        html.I(className='search icon'),
+                    ]),
+                ]),
+                html.Div(className='cf mv3', children=[
+                    html.Label('Licence'),
+                    dcc.Dropdown(id='status-licence', multi=True, options=[]),
+                ]),
+                html.Div(className='cf mv3', children=[
+                    html.Label('Currency'),
+                    dcc.Dropdown(id='status-currency', multi=True, options=[]),
+                ]),
+                html.Div(className='cf mv3', children=[
+                    html.Label('File type'),
+                    dcc.Dropdown(id='status-file-type', multi=True, options=[]),
+                ]),
+                html.Div(className='cf mv3', children=[
+                    html.Label('Last updated'),
+                    dcc.Dropdown(id='status-last-modified', options=[
+                        {'label': 'All publishers', 'value': '__all'},
+                        {'label': 'In the last month', 'value': 'lastmonth'},
+                        {'label': 'In the last 6 months', 'value': '6month'},
+                        {'label': 'In the last year', 'value': '12month'},
+                    ]),
+                ]),
+                html.Div(className='cf mv3', children=[
+                    html.Label('Fields'),
+                    dcc.Dropdown(id='status-fields', multi=True, options=[]),
+                ]),
+            ]),
+        ]),
     ]),
-    html.Div(id='registry-charts', className='fl w-75 pa2'),
-    dcc.Graph(id='dummy-graph', style={'display': 'none'}),
+    html.Div(className="fl w-75-l w-100 pa2-l", children=[
+        html.Div(id='status-rows', children=[], className=''),
+    ]),
 ])
 
+@app.callback(Output('status-licence', 'options'),
+              [Input('status-container', 'children')])
+def get_status_options(_):
+    reg = get_registry(THREESIXTY_STATUS_JSON)
+    licenses = {}
+    for r in reg:
+        if r.get('license') and r.get('license') in licenses:
+            continue
+        licenses[r.get('license')] = r.get('license_name')
+    return [{
+        "label": v,
+        "value": k
+    } for k, v in licenses.items()]
 
+@app.callback(Output('status-fields', 'options'),
+              [Input('status-container', 'children')])
+def get_status_options(_):
+    reg = get_registry(THREESIXTY_STATUS_JSON)
+    fields = set()
+    for r in reg:
+        for f, field in r.get("datagetter_coverage", {}).items():
+            if field.get("standard"):
+                fields.add(f)
+    fields = sorted(list(fields))
+    return [{
+        "label": f,
+        "value": f
+    } for f in list(fields)]
 
-@app.callback(Output('registry-charts', 'children'),
-                [Input('registry-filters', 'children')])
-def get_registry_charts(filters):
-    reg = get_registry_by('publisher')
-    reg_file = get_registry_by('file')
-    currencies = get_registry_currencies(reg)
-
-    return [
-        html.Div([
-            html.H2('Grants by publisher'),
-            grants_treemap(reg)
-        ], className='fl w-50'),
-        
-        html.Div([
-
-            html.H2('Currencies used'),
-            by_currency(reg, currencies),
-        ], className='fl w-50'),
-
-        html.Div([
-            html.H2('Years covered'),
-            by_year(reg),
-            html.Div(html.Pre(id='years-covered-selected'))
-        ], className='fl w-50'),
-
-        html.Div([
-            html.H2('Number of grants'),
-            by_number_of_grants(reg),
-        ], className='fl w-50'),
-
-        html.Div([
-            html.H2('Year issued'),
-            by_date_issued(reg),
-        ], className='fl w-50'),
-
-    ]
-
-
-### Charts ####
-
-import squarify
-
-CHART_CONFIG = {
-                'scrollZoom': False,
-                'modeBarButtonsToRemove': ['sendDataToCloud', 'zoom2d', 'pan2d', 'zoomIn2d', 'zoomOut2d',
-                                           'autoScale2d', 'resetScale2d', 'hoverClosestCartesian',
-                                           'hoverCompareCartesian', 'toggleSpikelines', 'lasso2d']
-            }
-
-
-def grants_treemap(reg, sort_by='grants'):
-
-    x = 0.
-    y = 0.
-    width = 100.
-    height = 100.
-
-    pub_sums = [{
-        "publisher": pub, 
-        "grants": sum([
-            r.get('datagetter_aggregates', {}).get('count', 0.0000001) for r in pub_reg
-        ]),
-        "grant_amount_GBP": sum([
-            r.get('datagetter_aggregates', {}).get('currencies', {}).get('GBP', {}).get('total_amount', 0.0000001) for r in pub_reg
-        ])
-    } for pub, pub_reg in reg.items()]
-
-    shapes = {}
-    annotations = {}
-    hovertext = {}
-    publishers = {}
-    traces = []
-
-    for f in ['grants', 'grant_amount_GBP']:
-        values = sorted(pub_sums, key=lambda x: x.get(f, 0), reverse=True)
-        publishers[f] = [p["publisher"] for p in values]
-        values = [p[f] for p in values]
+@app.callback(Output('status-currency', 'options'),
+              [Input('status-container', 'children')])
+def get_currency_options(_):
+    reg = get_registry(THREESIXTY_STATUS_JSON)
+    currencies = []
+    for r in reg:
+        for c in r.get("datagetter_aggregates", {}).get('currencies', {}):
+            if c not in currencies:
+                currencies.append(c)
     
-        normed = squarify.normalize_sizes(values, width, height)
-        rects = squarify.squarify(normed, x, y, width, height)
+    return [{
+        "label": "{} [{}]".format(babel.numbers.get_currency_name(c), c),
+        "value": c
+    } for c in currencies]
 
-        colours = ['rgb(166,206,227)', 'rgb(31,120,180)', 'rgb(178,223,138)',
-                        'rgb(51,160,44)', 'rgb(251,154,153)', 'rgb(227,26,28)']
-        shapes[f] = []
-        annotations[f] = []
-        hovertext[f] = []
+@app.callback(Output('status-file-type', 'options'),
+              [Input('status-container', 'children')])
+def get_filetype_options(_):
+    reg = get_registry(THREESIXTY_STATUS_JSON)
+    filetypes = {}
+    for r in reg:
+        filetype = r.get('datagetter_metadata', {}).get("file_type")
+        filetypes[filetype] = FILE_TYPES.get(filetype, (filetype, filetype))
+    return [{
+        "label": "{} ({})".format(v[0], v[1]),
+        "value": k
+    } for k, v in filetypes.items()]
 
-        for counter, r in enumerate(rects):
-            shapes[f].append(
-                dict(
-                    type='rect',
-                    x0=r['x'],
-                    y0=r['y'],
-                    x1=r['x']+r['dx'],
-                    y1=r['y']+r['dy'],
-                    line=dict(width=2),
-                    fillcolor=colours[counter % len(colours)]
-                )
+
+@app.callback(Output('status-rows', 'children'),
+              [Input('status-search', 'value'),
+               Input('status-licence', 'value'),
+               Input('status-last-modified', 'value'),
+               Input('status-currency', 'value'),
+               Input('status-file-type', 'value'),
+               Input('status-fields', 'value')])
+def update_status_container(search, licence, last_modified, currency, filetype, fields):
+    reg = get_registry_by_publisher(filters={
+        "search": search,
+        "licence": licence,
+        "last_modified": last_modified,
+        "currency": currency,
+        "filetype": filetype,
+        "fields": fields
+    }, reg_url=THREESIXTY_STATUS_JSON)
+
+    file_count = sum([len(pub_reg) for pub, pub_reg in reg.items()])
+    rows = [
+        html.Div(className='w-100 f3', children=[
+            html.Span(className="", children=[
+                html.Strong(len(reg)),
+                ' ' + pluralize("publisher", len(reg))
+            ]),
+            html.Span(className='mh2', children='·'),
+            html.Span(className="", children=[
+                html.Strong(file_count),
+                ' ' + pluralize("file", file_count)
+            ]),
+        ])
+    ]
+    for pub, pub_reg in reg.items():
+        rows.append(
+            html.Div(className='br2 ba dark-gray b--black-10 mv4 w-100 center mb4', children=[
+                html.Div(className='w-100 cf pa3', children=[
+                    html.A(className='f3 link black b',
+                           href=pub_reg[0].get("publisher", {}).get("website"),
+                           target='_blank', children=[
+                               pub_reg[0].get("publisher", {}).get("name")
+                           ]),
+                    html.Img(className='fr mw5', src=pub_reg[0].get(
+                        "publisher", {}).get("logo"), style={'max-height': '8rem'}),
+                ]),
+                html.Div(className='content', children=[
+                    html.Div(className='flex ph3', children=([
+                        to_statistic(len(pub_reg), pluralize("file", len(pub_reg)))
+                    ] + get_publisher_stats(pub_reg, separator=html.Span('·')) if len(pub_reg)>1 else [])
+                    ),
+                    html.Div(className='description', children=[
+                        file_row(v, len(pub_reg)) for v in pub_reg
+                    ])
+                ])
+            ])
+        )
+    return rows
+
+def file_row(v, files=1):
+    style = {"border-top": '0'} if files > 1 else {}
+
+    validity = {
+        'valid': {'class': '', 'icon': None, 'messages': {
+            'positive': 'Valid data', 'negative': 'Data invalid'
+        }, 'message': 'Validity unknown'},
+        'downloads': {'class': '', 'icon': None, 'messages': {
+            'positive': 'Download link working', 'negative': 'Download link broken'
+        }, 'message': 'Download link not checked'},
+        'acceptable_license': {'class': '', 'icon': None, 'messages': {
+            'positive': 'Licensed for reuse', 'negative': 'Licence doesn\'t allow reuse'
+        }, 'message': 'Unknown licence'},
+    }
+    for i in validity:
+        if v.get('datagetter_metadata', {}).get(i)==True:
+            validity[i]['class'] = 'positive'
+            validity[i]['icon'] = html.Span(className='green mr1', children='✓')
+            validity[i]['message'] = validity[i]['messages']['positive']
+            validity[i]['color'] = 'green'
+        elif v.get('datagetter_metadata', {}).get(i)==False:
+            validity[i]['class'] = 'positive'
+            validity[i]['icon'] = html.Span(className='red mr1', children='✕')
+            validity[i]['message'] = validity[i]['messages']['negative']
+            validity[i]['color'] = 'red'
+
+    file_type = v.get("datagetter_metadata", {}).get("file_type", "")
+    file_type = FILE_TYPES.get(file_type.lower(), (file_type, "Unknown"))
+
+    return html.Div(className='bt pa3 b--black-10', children=[
+        html.Div(className='content', children=[
+            html.A(
+                children=get_license_badge(v.get('license'), v.get("license_name")),
+                href=v.get('license'), 
+                target='_blank',
+                className='fr',
+            ),
+            html.A(
+                v.get("title"),
+                href=v.get('distribution', [{}])[0].get('accessURL'),
+                target="_blank",
+                className='f4 link black b'
+            ),
+            html.Div(className='gray', children=[
+                html.Span(get_date_range(v)),
+                html.Span(className='mh1', children='·'),
+                html.Span(', '.join(
+                    [babel.numbers.get_currency_name(k) for k in v.get("datagetter_aggregates", {}).get("currencies", {})]
+                )),
+                html.Span(className='mh1', children='·'),
+                html.Span([
+                    'Last modified ',
+                    html.Time(dateTime=v.get("modified"), children=[
+                    humanize.naturaldelta(
+                        datetime.datetime.now() - dateutil.parser.parse(v.get("modified"), ignoretz=True)
+                    )]),
+                    ' ago'
+                ]),
+            ]),
+            html.Div(className='mt3', children=[
+                html.Div(className='flex', children=get_file_stats(v, as_statistic=True),)
+            ]),
+        ]),
+        html.Div(className='pb3', children=[
+            html.Span(
+                [
+                    validity[i]['icon'],
+                    validity[i]['message']
+                ],
+                className=validity[i]['class'] + ' mr3',
+                style={
+                    "color": validity[i].get('color')
+                }
             )
-            if counter < 4:
-                annotations[f].append(
-                    dict(
-                        x=r['x']+(r['dx']/2),
-                        y=r['y']+(r['dy']/2),
-                        text=publishers[f][counter],
-                        showarrow=False
-                    )
-                )
+            for i in validity
+        ]),
+        html.Div(className='mv3', children=[
+            html.A(
+                'Download from publisher (in {} format)'.format(file_type[0]),
+                href=v.get('distribution', [{}])[0].get('downloadURL'),
+                className='link white dim bg-threesixty-red pa2',
+                title=file_type[1],
+            ),
+        ]),
+        html.Div(className='mv3 f7 gray', children=[html.Strong("Fields used")] + [
+            html.Span(f, className="ml2") for f, field in v.get("datagetter_coverage", {}).items()
+        ])
+    ])
 
-            hovertext[f].append(
-                "{} ({:,.0f})".format(publishers[f][counter], values[counter])
-            )
+def to_statistic(val, label):
+    return html.Div([
+        html.Strong(val, className='f3 b', style={}),
+        html.Div(label, className=''),
+    ], className='pa3 tc', style={})
 
-        # For hover text
-        traces.append(dict(
-            x=[r['x']+(r['dx']/2) for r in rects],
-            y=[r['y']+(r['dy']/2) for r in rects],
-            text=hovertext,
-            mode='none',
-            hoverinfo='text',
-            type='scatter',
-            # visible=(f == 'grants')
+def get_file_stats(v, separator=None, as_statistic=True):
+    stats = []
+    agg = v.get("datagetter_aggregates")
+    if agg is None:
+        return stats
+
+    count = agg.get("count", 0)
+    stats.append(to_statistic(
+        humanize.intcomma(count), 
+        pluralize("grant", count)
+    ))
+
+    recip = agg.get("distinct_recipient_org_identifier_count", 0)
+    if recip > 0:
+        stats.append(to_statistic(
+            humanize.intcomma(recip),
+            pluralize("recipient", recip),
         ))
 
-    layout = dict(
-        height=700,
-        width=700,
-        xaxis=dict(showgrid=False, zeroline=False, visible=False),
-        yaxis=dict(showgrid=False, zeroline=False, visible=False),
-        shapes=shapes[sort_by],
-        annotations=annotations[sort_by],
-        hovermode='closest',
-        updatemenus=list([
-            dict(buttons=[
-                    {
-                        'label': "by number of grants",
-                        "method": 'update',
-                        "args": [
-                            {'visible': [True, False]},
-                            {'shapes': shapes['grants'],
-                            'annotations': annotations['grants']},
-                        ]
-                    },
-                    {
-                        'label': "by grant amount",
-                        "method": 'update',
-                        "args": [
-                            {'visible': [False, True]},
-                            {'shapes': shapes['grant_amount_GBP'],
-                            'annotations': annotations['grant_amount_GBP']},
-                        ]
-                    }
-                ],
-                y = 1.0,
-                yanchor = 'top',
-            )
-        ])
-    )
+    funders = agg.get("distinct_funding_org_identifier_count", 0)
+    if funders > 1:
+        stats.append(to_statistic(
+            humanize.intcomma(funders),
+            pluralize("funder", funders),
+        ))
+        
 
-    return dcc.Graph(id='grants-treemap',
-                     figure={
-                        'data': traces,
-                        'layout': layout
-                     },
-                     config=CHART_CONFIG
-                     )
+    if len(agg.get("currencies", {}))==1:
+        for c in agg["currencies"]:
+            cur = format_currency(agg["currencies"][c].get("total_amount", 0), c)
+            stats.append(to_statistic(cur[0], cur[1]))
+            
 
-def by_currency(reg, currencies):
-
-    def publisher_uses_currency(publisher, currency):
-        for r in publisher:
-            if currency in r.get('datagetter_aggregates', {}).get('currencies', {}).keys():
-                return True
-        return False
-
-    data = [
-        {
-            'x': currencies,
-            'y': [
-                sum([1 if publisher_uses_currency(pub, currency)
-                     else 0 for pub in reg.values()])
-                for currency in currencies
-            ],
-            'type': 'bar',
-            'name': 'Publishers',
-            'visible': True,
-        },
-        {
-            'x': currencies,
-            'y': [
-                sum([
-                    sum([1 if currency in r.get('datagetter_aggregates', {}).get(
-                        'currencies', {}).keys() else 0 for r in pub])
-                    for pub in reg.values()])
-                for currency in currencies
-            ],
-            'type': 'bar',
-            'name': 'Files',
-            'visible': False,
-        },
-        {
-            'x': currencies,
-            'y': [
-                sum([
-                    sum([r.get('datagetter_aggregates', {}).get(
-                        'currencies', {}).get(currency, {}).get('count', 0) for r in pub])
-                    for pub in reg.values()])
-                for currency in currencies
-            ],
-            'type': 'bar',
-            'name': 'Grants',
-            'visible': False,
-        }
-    ]
-
-    return dcc.Graph(id='currencies-used',
-        figure={
-            'data': data,
-            'layout': {
-                'title': 'Currency used',
-                'updatemenus': [
-                    {   
-                        'active': 0,
-                        'buttons': get_buttons(data),
-                        'y': 1.0,
-                        'yanchor': 'top',
-                    }
-                ]
-            },
-        },
-        config=CHART_CONFIG
-    )
+    if separator:
+        result = [separator] * (len(stats) * 2 - 1)
+        result[0::2] = stats
+        return result
+    
+    return stats
 
 
-def by_date_issued(reg):
-    issued = flatten_list([[r.get('issued') for r in reg_pub if r.get('issued')] for reg_pub in reg.values()])
-    issued_count = flatten_list([[
-        r.get('datagetter_aggregates', {}).get('count', 0)
-        for r in reg_pub if r.get('issued')] for reg_pub in reg.values()])
-    issued_amount = flatten_list([[
-        r.get('datagetter_aggregates', {}).get('currencies', {}).get('GBP', {}).get('total_amount', 0)
-        for r in reg_pub if r.get('issued')] for reg_pub in reg.values()])
-    issued_pub = [min([r.get('issued') for r in reg_pub if r.get('issued')]) for reg_pub in reg.values()]
-    min_issued = min(issued)
-    max_issued = max(issued)
+def get_publisher_stats(pub_reg, **kwargs):
+    data = {
+        "count": 0,
+        "currencies": {}
+    }
 
-    data = [
-        {
-            'x': issued_pub,
-            'type': 'histogram',
-            'name': 'Publishers',
-            'visible': True,
-        },
-        {
-            'x': issued,
-            'type': 'histogram',
-            'name': 'Files',
-            'visible': False,
-        },
-        {
-            'x': issued,
-            'y': issued_count,
-            'histfunc': 'sum',
-            'type': 'histogram',
-            'name': 'Grant count',
-            'visible': False,
-        },
-        {
-            'x': issued,
-            'y': issued_amount,
-            'histfunc': 'sum',
-            'type': 'histogram',
-            'name': 'Grant amount',
-            'visible': False,
-        },
-    ]
+    for r in pub_reg:
+        data["count"] += r.get("datagetter_aggregates", {}).get("count", 0)
+        for c, cagg in r.get("datagetter_aggregates", {}).get("currencies", {}).items():
+            if c not in data["currencies"]:
+                data["currencies"][c] = {"total_amount": 0}
+            data["currencies"][c]["total_amount"] += cagg.get("total_amount", 0)
 
-    return dcc.Graph(id='files-issued',
-                     figure={
-                         'data': data,
-                         'layout': {
-                             'title': 'By date published',
-                             'updatemenus': [
-                                 {
-                                     'active': 0,
-                                     'buttons': get_buttons(data)
-                                 }
-                             ]
-                         }
-                     },
-                     config=CHART_CONFIG
-                     )
+    return get_file_stats({"datagetter_aggregates": data}, **kwargs)
 
-def by_year(reg):
+def get_date_range(v):
+    agg = v.get("datagetter_aggregates")
+    if agg is None:
+        return None
 
-    default_year = datetime.datetime.now()
+    max_award_date = datetime.datetime.strptime(agg.get("max_award_date", None), "%Y-%m-%d")
+    min_award_date = datetime.datetime.strptime(agg.get("min_award_date", None), "%Y-%m-%d")
+    if max_award_date and min_award_date:
+        min_award_ym = min_award_date.strftime("%b %Y")
+        max_award_ym = max_award_date.strftime("%b %Y")
+        if min_award_ym == max_award_ym:
+            return max_award_ym
+        else:
+            return (min_award_ym + " to " + max_award_ym)
 
-    max_year = max([
-        max([r.get('datagetter_aggregates', {}).get('max_award_date', default_year).year for r in reg_pub]) 
-        for reg_pub in reg.values()])
-    min_year = min([
-        min([r.get('datagetter_aggregates', {}).get('min_award_date', default_year).year for r in reg_pub]) 
-        for reg_pub in reg.values()])
-    years = list(range(min_year, max_year))
+def get_license_badge(url, name):
+    if "creativecommons.org/licenses" in url:
+        components = ['cc'] + url.split("/")[-3].split("-")
+        return [
+            html.Img(src="https://mirrors.creativecommons.org/presskit/icons/{}.png".format(c.lower()), 
+                title=name, style={'max-height': '24px', 'margin-right': '2px'})
+            for c in components
+        ]
 
-    def year_in_file(year, max_award_date, min_award_date):
-        return max_award_date is not None and min_award_date is not None and \
-            year <= max_award_date.year and year >= min_award_date.year
+    if "creativecommons.org/publicdomain" in url:
+        components = ['publicdomain'] + url.split("/")[-3].split("-")
+        return [
+            html.Img(src="https://mirrors.creativecommons.org/presskit/icons/{}.png".format(c.lower()), 
+                title=name, style={'max-height': '24px', 'margin-right': '2px'})
+            for c in components
+        ]
 
-    def year_in_publisher(pub, year):
-        for r in pub:
-            if year_in_file(year, 
-                            r.get('datagetter_aggregates', {}).get('max_award_date'), 
-                            r.get('datagetter_aggregates', {}).get('min_award_date')):
-                return True
+    if "creativecommons.org" in url:
+        badge_url = url.replace("creativecommons.org/licenses", "i.creativecommons.org/l")
+        badge_url = badge_url.replace("creativecommons.org/publicdomain", "i.creativecommons.org/p")
+        badge_url = badge_url + "88x31.png"
+        return [html.Img(src=badge_url, title=name, style={'max-height': '24px'})]
 
-    data = [
-        {
-            'x': years,
-            'y': [
-                sum([1 if year_in_publisher(pub, year)
-                     else 0 for pub in reg.values()])
-                for year in years
-            ],
-            'type': 'line',
-            'name': 'Publishers',
-            'visible': True,
-        },
-        {
-            'x': years,
-            'y': [
-                sum([
-                    sum([1 if year_in_file(year,
-                                           r.get('datagetter_aggregates', {}).get('max_award_date'),
-                                           r.get('datagetter_aggregates', {}).get('min_award_date')) else 0 for r in pub])
-                    for pub in reg.values()])
-                for year in years
-            ],
-            'type': 'line',
-            'name': 'Files',
-            'visible': False,
-        },
-        {
-            'x': years,
-            'y': [
-                sum([
-                    sum([r.get('datagetter_aggregates', {}).get('count', 0) if year_in_file(year,
-                                           r.get('datagetter_aggregates', {}).get(
-                                               'max_award_date'),
-                                           r.get('datagetter_aggregates', {}).get('min_award_date')) else 0 for r in pub])
-                    for pub in reg.values()])
-                for year in years
-            ],
-            'type': 'line',
-            'name': 'Grants',
-            'visible': False,
-        }
-    ]
+    if "open-government-licence" in url:
+        badge_url = "http://www.nationalarchives.gov.uk/images/infoman/ogl-symbol-41px-retina-black.png"
+        return [html.Img(src=badge_url, title=name, style={'max-height': '24px'})]
 
-    return dcc.Graph(id='years-covered',
-        figure={
-            'data': data,
-            'layout': {
-                'title': 'Years covered',
-                'xaxis': {
-                    'fixedrange': True
-                },
-                'yaxis': {
-                    'fixedrange': True
-                },
-                'updatemenus': [
-                    {   
-                        'active': 0,
-                        'buttons': get_buttons(data)
-                    }
-                ]
-            },
-        },
-        config=CHART_CONFIG
-    )
-
-@app.callback(Output('years-covered-selected', 'children'),
-              [Input('years-covered', 'selectedData')])
-def get_selected_years(points):
-    if points:
-        print(points)
-        years = [x.get('x') for x in points.get('points', [])]
-        return json.dumps(years, indent=4)
-
-def by_number_of_grants(reg):
-
-    data = [
-        {
-            'x': [
-                sum([
-                    r.get('datagetter_aggregates', {}).get('count') for r in pub 
-                    if r.get('datagetter_aggregates', {}).get('count')
-                ]) for pub in reg.values()
-            ],
-            'type': 'histogram',
-            'name': 'Publishers',
-            'visible': True,
-        },
-        {
-            'x': flatten_list([
-                [
-                    r.get('datagetter_aggregates', {}).get('count') for r in pub
-                    if r.get('datagetter_aggregates', {}).get('count')
-                ] for pub in reg.values()
-            ]),
-            'type': 'histogram',
-            'name': 'Files',
-            'visible': False,
-        },
-    ]
-
-    return dcc.Graph(id='number-of-grants',
-                     figure={
-                         'data': data,
-                         'layout': {
-                             'title': 'Number of grants',
-                             'updatemenus': [
-                                 {
-                                     'active': 0,
-                                     'buttons': get_buttons(data)
-                                 }
-                             ]
-                         }
-                     },
-                     config=CHART_CONFIG
-                     )
+    if "http://www.opendefinition.org/licenses/odc-pddl" == url:
+        return [html.Div('ODC PDDL', title=name, className='')]
+    
+    return name
 
 
 if __name__ == '__main__':
