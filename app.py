@@ -44,7 +44,123 @@ requests_cache.install_cache(
     allowable_methods=('GET', 'HEAD',),
 )
 
-app.layout = html.Div(id="status-container", className='', children=[
+app.title = '360Giving Insights'
+
+def layout_wrapper(contents):
+    return html.Div(children=[
+        html.Div(className='pv2 ph4', children=[
+            dcc.Location(id='url', refresh=False),
+            html.Div(id="page-header", className='cf mv3 pv3', children=[
+                html.H1(className='ostrich', children=[
+                    dcc.Link(href='/', className='link threesixty-red', children=[
+                        html.Img(className='mw4point5',
+                                src='/assets/360logo-text.png')
+                    ]),
+                ]),
+            ]),
+            html.Div(id='page-content', className='cf', children=contents),
+        ]),
+        html.Footer(className='pa3 bg-threesixty-grey cf', children=[
+            html.A(className='link fl', href='http://www.threesixtygiving.org/', children=[
+                html.Img(className='mw4', src='/assets/360logo-white.png'),
+            ]),
+            html.Nav(className='fr', children=[
+                html.Ul(className='list ttu b white f4 cf', children=[
+                    html.Li(className='fl pl3', children=[
+                        html.A(className='white link underline-hover',
+                            href='http://www.threesixtygiving.org/contact/',
+                            children='Contact'),
+                    ]),
+                    html.Li(className='fl pl3', children=[
+                        html.A(className='white link underline-hover',
+                            href='http://www.threesixtygiving.org/support/',
+                            children='Support'),
+                    ]),
+                    html.Li(className='fl pl3', children=[
+                        html.A(className='white link underline-hover',
+                            href='http://www.threesixtygiving.org/news-2/',
+                            children='News'),
+                    ]),
+                    html.Li(className='fl pl3', children=[
+                        html.A(className='white link underline-hover',
+                            href='http://www.threesixtygiving.org/support/standard/',
+                            children='360Giving Standard'),
+                    ]),
+                ]),
+                html.P(className='white f4 tr mt3', children=[
+                    html.A(className='white link underline-hover b br b--white pr3 mr3',
+                        href='tel:+442037525775',
+                        children='020 3752 5775'),
+                    html.A(className='white link underline-hover',
+                        href='mailto:info@threesixtygiving.org',
+                        children='info@threesixtygiving.org'),
+                ])
+            ]),
+        ]),
+        html.Footer(className='pa3 bg-threesixty-grey cf bt b--threesixty-dark-green', children=[
+            html.Div(className='cf', children=[
+                html.P(className='white fl ma0', children=[
+                    '360Giving is a company limited by guarantee ',
+                    html.A(className='white link underline pointer',
+                        href='https://beta.companieshouse.gov.uk/company/09668396',
+                        children='09668396'),
+                    ' and a registered charity ',
+                    html.A(className='white link underline pointer',
+                        href='http://beta.charitycommission.gov.uk/charity-details/?regid=1164883&subid=0',
+                        children='1164883'),
+                ]),
+                html.A(className='white ostrich ttu fr f4 link',
+                    href='https://us10.campaign-archive.com/home/?u=216b8b926250184f90c7198e8&id=91870dde44',
+                    children='Sign up to our newsletter'),
+            ]),
+            html.Nav(className='', children=[
+                html.Ul(className='list threesixty-mid-grey cf mt3 pl0', children=[
+                    html.Li(className='fl pr2 mr2 br b--threesixty-mid-grey', children=[
+                        html.A(className='threesixty-mid-grey link underline-hover',
+                            href='http://www.threesixtygiving.org/privacy/',
+                            children='Privacy notice'),
+                    ]),
+                    html.Li(className='fl pr2 mr2 br b--threesixty-mid-grey', children=[
+                        html.A(className='threesixty-mid-grey link underline-hover',
+                            href='http://www.threesixtygiving.org/terms-conditions/',
+                            children='Terms & Conditions'),
+                    ]),
+                    html.Li(className='fl pr2 mr2 br b--threesixty-mid-grey', children=[
+                        html.A(className='threesixty-mid-grey link underline-hover',
+                            href='http://www.threesixtygiving.org/cookie-policy/',
+                            children='Cookie Policy'),
+                    ]),
+                    html.Li(className='fl pr2 mr2 br b--threesixty-mid-grey', children=[
+                        html.A(className='threesixty-mid-grey link underline-hover',
+                            href='http://www.threesixtygiving.org/take-down-policy/',
+                            children='Take Down Policy'),
+                    ]),
+                    html.Li(className='fl pr2 mr2 br b--threesixty-mid-grey', children=[
+                        html.A(className='threesixty-mid-grey link underline-hover',
+                            href='https://creativecommons.org/licenses/by/4.0/',
+                            children='License'),
+                    ]),
+                    html.Li(className='fl pr2 mr2 br b--threesixty-mid-grey', children=[
+                        'Built by ',
+                        html.A(className='threesixty-mid-grey link underline',
+                            href='https://drkane.co.uk/',
+                            children='David Kane'),
+                        ' using ',
+                        html.A(className='threesixty-mid-grey link underline',
+                            href='https://dash.plot.ly/',
+                            children='Dash by Plotly'),
+                    ]),
+                    html.Li(className='fl', children=[
+                        html.A(className='threesixty-mid-grey link underline-hover',
+                            href='https://github.com/ThreeSixtyGiving/explorer',
+                            children='Github'),
+                    ]),
+                ])
+            ]),
+        ]),
+    ])
+
+app.layout = layout_wrapper(html.Div(id="status-container", className='', children=[
     html.Div(className="fl w-25-l w-100 pa2-l", children=[
         message_box(title="Filter data", contents=[
             html.Form(className='', children=[
@@ -86,7 +202,7 @@ app.layout = html.Div(id="status-container", className='', children=[
     html.Div(className="fl w-75-l w-100 pa2-l", children=[
         html.Div(id='status-rows', children=[], className=''),
     ]),
-])
+]))
 
 @app.callback([Output('status-licence', 'options'),
                Output('status-fields', 'options'),
